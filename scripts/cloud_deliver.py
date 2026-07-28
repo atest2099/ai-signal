@@ -1,11 +1,14 @@
-"""Cloud-side: fetch central feeds and deliver a digest to Feishu.
+"""Cloud-side: fetch central feeds, AI-remix into Chinese digest, deliver to Feishu.
 
 Runs on GitHub Actions — no local machine required.
-Fetches feed JSONs from the central repo, formats a readable digest,
+Fetches feed JSONs from the central repo, uses DeepSeek API for AI remixing
+(Chinese translation + editorial commentary + content curation),
 and pushes to the user's Feishu group via webhook.
 
 Usage:
-    FEISHU_WEBHOOK_URL=https://open.feishu.cn/... python scripts/cloud_deliver.py
+    FEISHU_WEBHOOK_URL=https://open.feishu.cn/... \
+    DEEPSEEK_API_KEY=sk-... \
+    python scripts/cloud_deliver.py
 """
 
 import json
@@ -46,11 +49,11 @@ def fetch_feed(feed_path):
     return None
 
 
-def format_digest():
-    """Fetch all feeds and format into a markdown digest."""
+def format_raw_digest():
+    """Fetch all feeds and format into a raw markdown digest for AI processing."""
     now = datetime.now(timezone(timedelta(hours=8)))
     date_str = now.strftime("%Y-%m-%d")
-    lines = [f"# AI Signal 日报 — {date_str}\n"]
+    lines = [f"# AI Signal Raw Feeds - {date_str}\n"]
 
     # --- X / Twitter ---
     x_data = fetch_feed(FEED_FILES["x"])
@@ -67,19 +70,20 @@ def format_digest():
             url = t.get("url", "")
             handle = acct.get("handle", "?")
             name = acct.get("name", "")
-            # Truncate long tweets
+            domain = acct.get("domain", "")
             if len(text) > 500:
                 text = text[:500] + "..."
-            x_lines.append(f"**X{tweet_count} @{handle}** ({name})\n{text}")
+            x_lines.append(f"X{tweet_count} @{handle} ({name}) [domain: {domain}]")
+            x_lines.append(f"  Text: {text}")
             if url:
-                x_lines.append(f"[原文链接]({url})")
+                x_lines.append(f"  URL: {url}")
             x_lines.append("")
 
     if x_lines:
-        lines.append(f"## X / Twitter（{tweet_count} 条）\n")
+        lines.append(f"## X / Twitter ({tweet_count} posts)\n")
         lines.extend(x_lines)
     else:
-        lines.append("## X / Twitter\n\n今日暂无新推文\n")
+        lines.append("## X / Twitter\nNo new posts today.\n")
 
     # --- Podcasts ---
     pod_data = fetch_feed(FEED_FILES["podcasts"])
@@ -90,20 +94,21 @@ def format_digest():
         channel = p.get("channel", "")
         link = p.get("link", "")
         desc = p.get("description", "").strip()
-        if len(desc) > 300:
-            desc = desc[:300] + "..."
-        pod_lines.append(f"**P{i} {channel}**\n{title}")
+        if len(desc) > 400:
+            desc = desc[:400] + "..."
+        pod_lines.append(f"P{i} [{channel}]")
+        pod_lines.append(f"  Title: {title}")
         if desc:
-            pod_lines.append(f"> {desc}")
+            pod_lines.append(f"  Description: {desc}")
         if link:
-            pod_lines.append(f"[收听链接]({link})")
+            pod_lines.append(f"  URL: {link}")
         pod_lines.append("")
 
     if pod_lines:
-        lines.append(f"## 播客（{len(podcasts)} 期）\n")
+        lines.append(f"## Podcasts ({len(podcasts)} episodes)\n")
         lines.extend(pod_lines)
     else:
-        lines.append("## 播客\n\n今日暂无新播客\n")
+        lines.append("## Podcasts\nNo new episodes today.\n")
 
     # --- Blog Articles ---
     blog_data = fetch_feed(FEED_FILES["articles"])
@@ -114,25 +119,25 @@ def format_digest():
         title = a.get("title", "").strip()
         url = a.get("url", "")
         summary = a.get("summary", "").strip()
-        if len(summary) > 400:
-            summary = summary[:400] + "..."
-        art_lines.append(f"**B{i} {source}**\n{title}")
+        if len(summary) > 500:
+            summary = summary[:500] + "..."
+        art_lines.append(f"B{i} [{source}]")
+        art_lines.append(f"  Title: {title}")
         if summary:
-            art_lines.append(f"> {summary}")
+            art_lines.append(f"  Summary: {summary}")
         if url:
-            art_lines.append(f"[阅读原文]({url})")
+            art_lines.append(f"  URL: {url}")
         art_lines.append("")
 
     if art_lines:
-        lines.append(f"## 官方博客（{len(articles)} 篇）\n")
+        lines.append(f"## Blog Articles ({len(articles)} posts)\n")
         lines.extend(art_lines)
     else:
-        lines.append("## 官方博客\n\n今日暂无新文章\n")
+        lines.append("## Blog Articles\nNo new articles today.\n")
 
     # --- arXiv Papers ---
     paper_data = fetch_feed(FEED_FILES["papers"])
     papers = (paper_data or {}).get("papers", [])
-    # Show top 15 papers to keep digest manageable
     shown = min(len(papers), 15)
     paper_lines = []
     for i, p in enumerate(papers[:shown], 1):
@@ -147,28 +152,116 @@ def format_digest():
         abs_url = p.get("abs_url", p.get("pdf_url", ""))
         cat = p.get("primary_category", "")
         abstract = p.get("abstract", "").strip()
-        if len(abstract) > 200:
-            abstract = abstract[:200] + "..."
+        if len(abstract) > 300:
+            abstract = abstract[:300] + "..."
 
-        paper_lines.append(f"**R{i} [{cat}]** {title}")
+        paper_lines.append(f"R{i} [{cat}]")
+        paper_lines.append(f"  Title: {title}")
         if author_str:
-            paper_lines.append(f"Authors: {author_str}")
+            paper_lines.append(f"  Authors: {author_str}")
         if abstract:
-            paper_lines.append(f"> {abstract}")
+            paper_lines.append(f"  Abstract: {abstract}")
         if abs_url:
-            paper_lines.append(f"[论文链接]({abs_url})")
+            paper_lines.append(f"  URL: {abs_url}")
         paper_lines.append("")
 
     if paper_lines:
-        extra = f"（共 {len(papers)} 篇，展示前 {shown} 篇）" if len(papers) > shown else f"（{len(papers)} 篇）"
-        lines.append(f"## arXiv 论文{extra}\n")
+        extra = f" (total {len(papers)}, showing top {shown})" if len(papers) > shown else f" ({len(papers)} papers)"
+        lines.append(f"## arXiv Papers{extra}\n")
         lines.extend(paper_lines)
 
-    lines.append("---")
-    lines.append(f"*由 GitHub Actions 云端推送 · {now.strftime('%Y-%m-%d %H:%M')} CST*")
-    lines.append("*电脑开机后将收到 AI 精编版日报*")
-
     return "\n".join(lines)
+
+
+SYSTEM_PROMPT = """你是 AI Signal 日报的资深编辑，擅长将 AI 一线动态整理为简洁有力的中文日报。
+
+你的任务：
+1. 将所有英文内容翻译为中文，保留原文术语（如 LLM、RAG、agent、inference 等）和 URL
+2. 每条内容用 3-5 句话概括，突出关键数据、观点和趋势
+3. 筛选最重要的内容，去掉不重要或重复的条目。通常保留 5-10 条推文、5-8 个播客、全部博客、5-8 篇论文
+4. 按以下格式排列并编号：
+
+## X / Twitter
+**X1 @handle（姓名）**
+概括内容（3-5句）...
+[原文链接](url)
+
+**X2 @handle（姓名）**
+概括内容（3-5句）...
+[原文链接](url)
+
+## 播客
+**P1 频道名**
+标题：xxx
+概括内容（3-5句）...
+[收听链接](url)
+
+## 官方博客
+**B1 来源**
+标题：xxx
+概括内容（3-5句）...
+[阅读原文](url)
+
+## arXiv 论文
+**R1 [分类]**
+标题：xxx
+概括内容（3-5句）...
+[论文链接](url)
+
+5. 在开头（标题之后）用 2-3 句话概述今日核心主题和趋势
+6. 保持 Markdown 格式
+7. 不要添加多余的分隔线或页脚，我会在代码中添加"""
+
+
+def remix_with_deepseek(raw_digest, api_key):
+    """Use DeepSeek API to remix the raw digest into a curated Chinese digest."""
+    now = datetime.now(timezone(timedelta(hours=8)))
+    date_str = now.strftime("%Y-%m-%d")
+
+    user_prompt = f"""请将以下原始信息源整理为今日（{date_str}）的 AI Signal 中文日报。
+
+原始信息源：
+
+{raw_digest}"""
+
+    print(f"[cloud_deliver] Calling DeepSeek API (input: {len(raw_digest)} chars)...")
+
+    try:
+        resp = httpx.post(
+            "https://api.deepseek.com/v1/chat/completions",
+            headers={
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json",
+            },
+            json={
+                "model": "deepseek-chat",
+                "messages": [
+                    {"role": "system", "content": SYSTEM_PROMPT},
+                    {"role": "user", "content": user_prompt},
+                ],
+                "temperature": 0.3,
+                "max_tokens": 8192,
+                "stream": False,
+            },
+            timeout=120,
+        )
+
+        if resp.is_success:
+            data = resp.json()
+            content = data["choices"][0]["message"]["content"]
+            usage = data.get("usage", {})
+            print(f"[cloud_deliver] DeepSeek OK: {usage.get('total_tokens', '?')} tokens used")
+            # Prepend title
+            title_line = f"# AI Signal 日报 - {date_str}\n"
+            if not content.startswith("# AI Signal"):
+                content = title_line + "\n" + content
+            return content
+        else:
+            print(f"[cloud_deliver] DeepSeek API error: {resp.status_code} - {resp.text[:300]}", file=sys.stderr)
+            return None
+    except Exception as e:
+        print(f"[cloud_deliver] DeepSeek API exception: {e}", file=sys.stderr)
+        return None
 
 
 def send_feishu(text, webhook_url):
@@ -233,9 +326,25 @@ def main():
         print("[cloud_deliver] FEISHU_WEBHOOK_URL not set", file=sys.stderr)
         sys.exit(1)
 
+    deepseek_key = os.environ.get("DEEPSEEK_API_KEY", "")
+
     print("[cloud_deliver] Fetching feeds...")
-    digest = format_digest()
-    print(f"[cloud_deliver] Digest formatted ({len(digest)} chars)")
+    raw_digest = format_raw_digest()
+    print(f"[cloud_deliver] Raw digest formatted ({len(raw_digest)} chars)")
+
+    if deepseek_key:
+        print("[cloud_deliver] AI remixing with DeepSeek...")
+        remixed = remix_with_deepseek(raw_digest, deepseek_key)
+        if remixed:
+            now = datetime.now(timezone(timedelta(hours=8)))
+            digest = remixed + f"\n\n---\n*GitHub Actions AI 精编 - {now.strftime('%Y-%m-%d %H:%M')} CST*"
+            print(f"[cloud_deliver] AI digest ready ({len(digest)} chars)")
+        else:
+            print("[cloud_deliver] AI remix failed, falling back to raw digest", file=sys.stderr)
+            digest = raw_digest + "\n\n---\n*GitHub Actions - raw format (AI remix failed)*"
+    else:
+        print("[cloud_deliver] No DEEPSEEK_API_KEY, using raw format", file=sys.stderr)
+        digest = raw_digest + "\n\n---\n*GitHub Actions - raw format (no AI)*"
 
     ok = send_feishu(digest, webhook_url)
     sys.exit(0 if ok else 1)
