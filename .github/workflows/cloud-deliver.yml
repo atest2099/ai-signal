@@ -26,5 +26,7 @@ jobs:
       - name: Fetch feeds, AI remix, and deliver to Feishu
         env:
           FEISHU_WEBHOOK_URL: ${{ secrets.FEISHU_WEBHOOK_URL }}
-          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+          LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
+          LLM_BASE_URL: https://ai.api.coregpu.cn/v1/chat/completions
+          LLM_MODEL: deepseek-v4-flash-w8a8
         run: python scripts/cloud_deliver.py
