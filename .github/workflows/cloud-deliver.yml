@@ -1,0 +1,29 @@
+name: Cloud Deliver to Feishu
+
+on:
+  schedule:
+    - cron: '0 0 * * *'  # UTC 00:00 = Beijing 08:00 (2h after feed generation)
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  deliver:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install httpx
+
+      - name: Fetch feeds and deliver to Feishu
+        env:
+          FEISHU_WEBHOOK_URL: ${{ secrets.FEISHU_WEBHOOK_URL }}
+        run: python scripts/cloud_deliver.py
