@@ -1,13 +1,16 @@
 """Cloud-side: fetch central feeds, AI-remix into Chinese digest, deliver to Feishu.
 
 Runs on GitHub Actions — no local machine required.
-Fetches feed JSONs from the central repo, uses DeepSeek API for AI remixing
+Fetches feed JSONs from the central repo, uses LLM API for AI remixing
 (Chinese translation + editorial commentary + content curation),
 and pushes to the user's Feishu group via webhook.
 
+Supports any OpenAI-compatible API (China Telecom AI STORE, DeepSeek, etc.)
+via LLM_BASE_URL / LLM_API_KEY / LLM_MODEL env vars.
+
 Usage:
     FEISHU_WEBHOOK_URL=https://open.feishu.cn/... \
-    DEEPSEEK_API_KEY=sk-... \
+    LLM_API_KEY=sk-... \
     python scripts/cloud_deliver.py
 """
 
@@ -213,8 +216,21 @@ SYSTEM_PROMPT = """你是 AI Signal 日报的资深编辑，擅长将 AI 一线�
 7. 不要添加多余的分隔线或页脚，我会在代码中添加"""
 
 
-def remix_with_deepseek(raw_digest, api_key):
-    """Use DeepSeek API to remix the raw digest into a curated Chinese digest."""
+def remix_with_llm(raw_digest, api_key, base_url=None, model=None):
+    """Use an OpenAI-compatible LLM API to remix the raw digest into a curated Chinese digest.
+
+    Args:
+        raw_digest: The raw formatted feed text.
+        api_key: API key for the LLM service.
+        base_url: Full URL to the chat completions endpoint.
+                  Defaults to China Telecom AI STORE endpoint.
+        model: Model name to use. Defaults to DeepSeek-V4-Flash.
+    """
+    if base_url is None:
+        base_url = "https://ai.api.coregpu.cn/v1/chat/completions"
+    if model is None:
+        model = "deepseek-v4-flash-w8a8"
+
     now = datetime.now(timezone(timedelta(hours=8)))
     date_str = now.strftime("%Y-%m-%d")
 
@@ -224,17 +240,17 @@ def remix_with_deepseek(raw_digest, api_key):
 
 {raw_digest}"""
 
-    print(f"[cloud_deliver] Calling DeepSeek API (input: {len(raw_digest)} chars)...")
+    print(f"[cloud_deliver] Calling LLM API ({model} @ {base_url}, input: {len(raw_digest)} chars)...")
 
     try:
         resp = httpx.post(
-            "https://api.deepseek.com/v1/chat/completions",
+            base_url,
             headers={
                 "Authorization": f"Bearer {api_key}",
                 "Content-Type": "application/json",
             },
             json={
-                "model": "deepseek-chat",
+                "model": model,
                 "messages": [
                     {"role": "system", "content": SYSTEM_PROMPT},
                     {"role": "user", "content": user_prompt},
@@ -250,17 +266,17 @@ def remix_with_deepseek(raw_digest, api_key):
             data = resp.json()
             content = data["choices"][0]["message"]["content"]
             usage = data.get("usage", {})
-            print(f"[cloud_deliver] DeepSeek OK: {usage.get('total_tokens', '?')} tokens used")
+            print(f"[cloud_deliver] LLM OK: {usage.get('total_tokens', '?')} tokens used")
             # Prepend title
             title_line = f"# AI Signal 日报 - {date_str}\n"
             if not content.startswith("# AI Signal"):
                 content = title_line + "\n" + content
             return content
         else:
-            print(f"[cloud_deliver] DeepSeek API error: {resp.status_code} - {resp.text[:300]}", file=sys.stderr)
+            print(f"[cloud_deliver] LLM API error: {resp.status_code} - {resp.text[:300]}", file=sys.stderr)
             return None
     except Exception as e:
-        print(f"[cloud_deliver] DeepSeek API exception: {e}", file=sys.stderr)
+        print(f"[cloud_deliver] LLM API exception: {e}", file=sys.stderr)
         return None
 
 
@@ -326,15 +342,18 @@ def main():
         print("[cloud_deliver] FEISHU_WEBHOOK_URL not set", file=sys.stderr)
         sys.exit(1)
 
-    deepseek_key = os.environ.get("DEEPSEEK_API_KEY", "")
+    # Support both LLM_API_KEY (preferred) and DEEPSEEK_API_KEY (legacy)
+    llm_key = os.environ.get("LLM_API_KEY", "") or os.environ.get("DEEPSEEK_API_KEY", "")
+    llm_base_url = os.environ.get("LLM_BASE_URL", "https://ai.api.coregpu.cn/v1/chat/completions")
+    llm_model = os.environ.get("LLM_MODEL", "deepseek-v4-flash-w8a8")
 
     print("[cloud_deliver] Fetching feeds...")
     raw_digest = format_raw_digest()
     print(f"[cloud_deliver] Raw digest formatted ({len(raw_digest)} chars)")
 
-    if deepseek_key:
-        print("[cloud_deliver] AI remixing with DeepSeek...")
-        remixed = remix_with_deepseek(raw_digest, deepseek_key)
+    if llm_key:
+        print(f"[cloud_deliver] AI remixing with {llm_model}...")
+        remixed = remix_with_llm(raw_digest, llm_key, llm_base_url, llm_model)
         if remixed:
             now = datetime.now(timezone(timedelta(hours=8)))
             digest = remixed + f"\n\n---\n*GitHub Actions AI 精编 - {now.strftime('%Y-%m-%d %H:%M')} CST*"
@@ -343,7 +362,7 @@ def main():
             print("[cloud_deliver] AI remix failed, falling back to raw digest", file=sys.stderr)
             digest = raw_digest + "\n\n---\n*GitHub Actions - raw format (AI remix failed)*"
     else:
-        print("[cloud_deliver] No DEEPSEEK_API_KEY, using raw format", file=sys.stderr)
+        print("[cloud_deliver] No LLM_API_KEY, using raw format", file=sys.stderr)
         digest = raw_digest + "\n\n---\n*GitHub Actions - raw format (no AI)*"
 
     ok = send_feishu(digest, webhook_url)
