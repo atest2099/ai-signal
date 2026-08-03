@@ -344,6 +344,38 @@ def send_feishu(text, webhook_url):
     return False
 
 
+def send_alert(webhook_url, title, message):
+    """Send a prominent red alert card to Feishu — used when generation/delivery fails."""
+    now = datetime.now(timezone(timedelta(hours=8)))
+    resp = httpx.post(
+        webhook_url,
+        json={
+            "msg_type": "interactive",
+            "card": {
+                "header": {
+                    "title": {"tag": "plain_text", "content": "⚠️ " + title},
+                    "template": "red",
+                },
+                "elements": [
+                    {"tag": "markdown", "content": message},
+                    {"tag": "hr"},
+                    {"tag": "markdown", "content": f"*告警时间：{now.strftime('%Y-%m-%d %H:%M')} CST*"},
+                ],
+            },
+        },
+        timeout=30,
+    )
+    if resp.is_success:
+        r = resp.json()
+        if r.get("code") == 0 or r.get("StatusCode") == 0:
+            print("[cloud_deliver] Alert sent to Feishu")
+            return True
+        print(f"[cloud_deliver] Feishu alert error: {r}", file=sys.stderr)
+    else:
+        print(f"[cloud_deliver] Alert HTTP {resp.status_code}: {resp.text[:200]}", file=sys.stderr)
+    return False
+
+
 def main():
     webhook_url = os.environ.get("FEISHU_WEBHOOK_URL", "")
     if not webhook_url:
@@ -368,26 +400,41 @@ def main():
         if remixed:
             digest = remixed + f"\n\n---\n*GitHub Actions AI 精编 - {now.strftime('%Y-%m-%d %H:%M')} CST*"
             print(f"[cloud_deliver] AI digest ready ({len(digest)} chars)")
+            ok = send_feishu(digest, webhook_url)
+            if not ok:
+                # 中文日报已生成但飞书推送失败：尽力再发一次告警
+                send_alert(
+                    webhook_url,
+                    "AI Signal 日报推送失败",
+                    f"⚠️ **AI Signal 日报推送失败（告警）**\n\n"
+                    f"日期：{date_str}\n\n"
+                    "中文日报已成功生成，但推送到飞书失败。\n"
+                    "请检查飞书机器人 webhook 地址是否有效、群内机器人是否被移除。",
+                )
         else:
-            # AI 调用重试后仍失败：只发中文提示，绝不退回英文原文
-            print("[cloud_deliver] AI remix failed after retries, sending Chinese fallback notice", file=sys.stderr)
-            digest = (
-                f"# AI Signal 日报 - {date_str}\n\n"
-                "⚠️ 今日 AI Signal 中文日报因 AI 翻译服务临时不可用，未能生成，暂不推送英文原文。\n\n"
-                "我们将在 AI 服务恢复后补发完整中文版。你也可以手动触发一次本地推送获取当期日报。\n\n"
-                f"*GitHub Actions · {date_str} 中文生成失败，已避免发送英文*"
+            # AI 调用重试后仍失败：发红色告警卡，绝不退回英文原文
+            print("[cloud_deliver] AI remix failed after retries -> alerting", file=sys.stderr)
+            ok = send_alert(
+                webhook_url,
+                "AI Signal 日报生成失败",
+                f"⚠️ **AI Signal 日报生成失败（告警）**\n\n"
+                f"日期：{date_str}\n\n"
+                "原因：AI 翻译服务连续 3 次调用失败（接口超时或返回错误）。已自动避免发送英文原文。\n\n"
+                "建议：检查 GitHub Actions 仓库 Secrets 中的 LLM_API_KEY / LLM_BASE_URL 配置；"
+                "或在 AI 服务恢复后手动触发一次推送补发中文版。",
             )
     else:
-        # 缺少密钥：发中文提示，不发送英文
-        print("[cloud_deliver] No LLM_API_KEY, sending Chinese fallback notice", file=sys.stderr)
-        digest = (
-            f"# AI Signal 日报 - {date_str}\n\n"
-            "⚠️ 未检测到 AI 翻译密钥（LLM_API_KEY），无法生成中文版。\n\n"
-            "请检查 GitHub Actions 仓库 Secrets 中的 LLM_API_KEY 配置是否正确。\n\n"
-            f"*GitHub Actions · {date_str} 缺少翻译密钥*"
+        # 缺少密钥：发红色告警卡，不发送英文
+        print("[cloud_deliver] No LLM_API_KEY -> alerting", file=sys.stderr)
+        ok = send_alert(
+            webhook_url,
+            "AI Signal 缺少翻译密钥",
+            f"⚠️ **AI Signal 日报未生成（告警）**\n\n"
+            f"日期：{date_str}\n\n"
+            "原因：未检测到 AI 翻译密钥（LLM_API_KEY）。\n\n"
+            "建议：在 GitHub Actions 仓库 Secrets 中配置 LLM_API_KEY。",
         )
 
-    ok = send_feishu(digest, webhook_url)
     sys.exit(0 if ok else 1)
 
 
