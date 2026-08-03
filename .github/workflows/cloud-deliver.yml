@@ -2,7 +2,7 @@ name: Cloud Deliver to Feishu
 
 on:
   schedule:
-    - cron: '0 0 * * *'  # UTC 00:00 = Beijing 08:00 (2h after feed generation)
+    - cron: '0 23 * * *'  # UTC 23:00 = Beijing 07:00（提前以抵消 GitHub 调度抖动；feeds 约北京时间 06:00 生成，07:00 触发有约 1h 余量）
   workflow_dispatch:
 
 permissions:
@@ -11,7 +11,7 @@ permissions:
 jobs:
   deliver:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
 
     steps:
       - uses: actions/checkout@v4
