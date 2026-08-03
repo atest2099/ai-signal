@@ -1,8 +1,8 @@
 name: Cloud Deliver to Feishu
 
 on:
-  schedule:
-    - cron: '0 23 * * *'  # UTC 23:00 = Beijing 07:00（提前以抵消 GitHub 调度抖动；feeds 约北京时间 06:00 生成，07:00 触发有约 1h 余量）
+  # 仅由外部精确调度（如 cron-job.org 于北京时间 07:55 触发 workflow_dispatch）调用，
+  # 不再使用 GitHub 自带 schedule，以避免调度抖动导致迟到、并防止与定时触发器重复发送。
   workflow_dispatch:
 
 permissions:
