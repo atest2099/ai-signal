@@ -242,42 +242,50 @@ def remix_with_llm(raw_digest, api_key, base_url=None, model=None):
 
     print(f"[cloud_deliver] Calling LLM API ({model} @ {base_url}, input: {len(raw_digest)} chars)...")
 
-    try:
-        resp = httpx.post(
-            base_url,
-            headers={
-                "Authorization": f"Bearer {api_key}",
-                "Content-Type": "application/json",
-            },
-            json={
-                "model": model,
-                "messages": [
-                    {"role": "system", "content": SYSTEM_PROMPT},
-                    {"role": "user", "content": user_prompt},
-                ],
-                "temperature": 0.3,
-                "max_tokens": 8192,
-                "stream": False,
-            },
-            timeout=120,
-        )
+    last_err = None
+    for attempt in range(1, 4):
+        try:
+            resp = httpx.post(
+                base_url,
+                headers={
+                    "Authorization": f"Bearer {api_key}",
+                    "Content-Type": "application/json",
+                },
+                json={
+                    "model": model,
+                    "messages": [
+                        {"role": "system", "content": SYSTEM_PROMPT},
+                        {"role": "user", "content": user_prompt},
+                    ],
+                    "temperature": 0.3,
+                    "max_tokens": 8192,
+                    "stream": False,
+                },
+                timeout=180,
+            )
 
-        if resp.is_success:
-            data = resp.json()
-            content = data["choices"][0]["message"]["content"]
-            usage = data.get("usage", {})
-            print(f"[cloud_deliver] LLM OK: {usage.get('total_tokens', '?')} tokens used")
-            # Prepend title
-            title_line = f"# AI Signal 日报 - {date_str}\n"
-            if not content.startswith("# AI Signal"):
-                content = title_line + "\n" + content
-            return content
-        else:
-            print(f"[cloud_deliver] LLM API error: {resp.status_code} - {resp.text[:300]}", file=sys.stderr)
-            return None
-    except Exception as e:
-        print(f"[cloud_deliver] LLM API exception: {e}", file=sys.stderr)
-        return None
+            if resp.is_success:
+                data = resp.json()
+                content = data["choices"][0]["message"]["content"]
+                usage = data.get("usage", {})
+                print(f"[cloud_deliver] LLM OK (attempt {attempt}): {usage.get('total_tokens', '?')} tokens used")
+                # Prepend title
+                title_line = f"# AI Signal 日报 - {date_str}\n"
+                if not content.startswith("# AI Signal"):
+                    content = title_line + "\n" + content
+                return content
+            else:
+                last_err = f"HTTP {resp.status_code}: {resp.text[:200]}"
+                print(f"[cloud_deliver] LLM API error (attempt {attempt}): {last_err}", file=sys.stderr)
+        except Exception as e:
+            last_err = f"{type(e).__name__}: {e}"
+            print(f"[cloud_deliver] LLM API exception (attempt {attempt}): {last_err}", file=sys.stderr)
+
+        if attempt < 3:
+            time.sleep(5 * attempt)
+
+    print(f"[cloud_deliver] LLM remix failed after 3 attempts: {last_err}", file=sys.stderr)
+    return None
 
 
 def send_feishu(text, webhook_url):
@@ -347,6 +355,9 @@ def main():
     llm_base_url = os.environ.get("LLM_BASE_URL", "https://ai.api.coregpu.cn/v1/chat/completions")
     llm_model = os.environ.get("LLM_MODEL", "deepseek-v4-flash-w8a8")
 
+    now = datetime.now(timezone(timedelta(hours=8)))
+    date_str = now.strftime("%Y-%m-%d")
+
     print("[cloud_deliver] Fetching feeds...")
     raw_digest = format_raw_digest()
     print(f"[cloud_deliver] Raw digest formatted ({len(raw_digest)} chars)")
@@ -355,15 +366,26 @@ def main():
         print(f"[cloud_deliver] AI remixing with {llm_model}...")
         remixed = remix_with_llm(raw_digest, llm_key, llm_base_url, llm_model)
         if remixed:
-            now = datetime.now(timezone(timedelta(hours=8)))
             digest = remixed + f"\n\n---\n*GitHub Actions AI 精编 - {now.strftime('%Y-%m-%d %H:%M')} CST*"
             print(f"[cloud_deliver] AI digest ready ({len(digest)} chars)")
         else:
-            print("[cloud_deliver] AI remix failed, falling back to raw digest", file=sys.stderr)
-            digest = raw_digest + "\n\n---\n*GitHub Actions - raw format (AI remix failed)*"
+            # AI 调用重试后仍失败：只发中文提示，绝不退回英文原文
+            print("[cloud_deliver] AI remix failed after retries, sending Chinese fallback notice", file=sys.stderr)
+            digest = (
+                f"# AI Signal 日报 - {date_str}\n\n"
+                "⚠️ 今日 AI Signal 中文日报因 AI 翻译服务临时不可用，未能生成，暂不推送英文原文。\n\n"
+                "我们将在 AI 服务恢复后补发完整中文版。你也可以手动触发一次本地推送获取当期日报。\n\n"
+                f"*GitHub Actions · {date_str} 中文生成失败，已避免发送英文*"
+            )
     else:
-        print("[cloud_deliver] No LLM_API_KEY, using raw format", file=sys.stderr)
-        digest = raw_digest + "\n\n---\n*GitHub Actions - raw format (no AI)*"
+        # 缺少密钥：发中文提示，不发送英文
+        print("[cloud_deliver] No LLM_API_KEY, sending Chinese fallback notice", file=sys.stderr)
+        digest = (
+            f"# AI Signal 日报 - {date_str}\n\n"
+            "⚠️ 未检测到 AI 翻译密钥（LLM_API_KEY），无法生成中文版。\n\n"
+            "请检查 GitHub Actions 仓库 Secrets 中的 LLM_API_KEY 配置是否正确。\n\n"
+            f"*GitHub Actions · {date_str} 缺少翻译密钥*"
+        )
 
     ok = send_feishu(digest, webhook_url)
     sys.exit(0 if ok else 1)
